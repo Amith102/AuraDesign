@@ -7,6 +7,7 @@ import { Server } from 'socket.io';
 import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -26,6 +27,8 @@ const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
 // Initialize Supabase if keys are provided
 const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY) 
@@ -89,7 +92,32 @@ app.post('/api/generate-image', async (req, res) => {
   try {
     let finalUrls = [];
 
-    if (OPENAI_API_KEY) {
+    if (GEMINI_API_KEY && ai) {
+      sendProgress('Triggering Gemini Image model...', 20);
+      
+      const response = await ai.models.generateImages({
+        model: 'imagen-3.0-generate-001',
+        prompt: prompt,
+        config: {
+          numberOfImages: 4,
+          outputMimeType: 'image/jpeg',
+          aspectRatio: '1:1'
+        }
+      });
+
+      sendProgress('Gemini processing complete!', 80);
+      
+      finalUrls = response.generatedImages.map(img => `data:image/jpeg;base64,${img.image.imageBytes}`);
+      
+      // Pad out to 5 images so UI does not crash if it expects exactly 5
+      while (finalUrls.length > 0 && finalUrls.length < 5) {
+          finalUrls.push(finalUrls[finalUrls.length - 1]);
+      }
+      
+      sendProgress('Saving generated models...', 90);
+      
+      return res.json({ imageUrls: finalUrls });
+    } else if (OPENAI_API_KEY) {
       sendProgress('Triggering OpenAI DALL-E model...', 20);
       
       const openaiRes = await fetch('https://api.openai.com/v1/images/generations', {
@@ -126,20 +154,34 @@ app.post('/api/generate-image', async (req, res) => {
 
   } catch (error) {
     console.error('Error generating image:', error.message);
-    sendProgress('OpenAI API unavailable. Loading cached design...', 90);
+    sendProgress('API unavailable. Falling back to free Pollinations AI...', 50);
+    
     try {
-      // Fallback to local image 
-      const __dirname = path.resolve();
-      const imagePath = path.join(__dirname, '..', 'public', 'design1.png');
-      const fileBuffer = fs.readFileSync(imagePath);
-      const base64Image = `data:image/png;base64,${fileBuffer.toString('base64')}`;
-      
-      // Pad out 5 identical offline fallback images just so UI doesn't crash
-      sendProgress('Complete (Offline Cache)!', 100);
-      return res.json({ imageUrls: [base64Image, base64Image, base64Image, base64Image, base64Image] });
-    } catch (fallbackErr) {
-      console.error('Ultimate fallback failed:', fallbackErr.message);
-      res.status(500).json({ error: 'Failed to generate image' });
+      let finalUrls = [];
+      for (let i = 1; i <= 4; i++) {
+        const seed = Math.floor(Math.random() * 1000000) + i;
+        finalUrls.push(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}`);
+      }
+      while (finalUrls.length > 0 && finalUrls.length < 5) {
+          finalUrls.push(finalUrls[finalUrls.length - 1]);
+      }
+      sendProgress('Pollinations processing complete!', 90);
+      return res.json({ imageUrls: finalUrls });
+    } catch (pollinationsErr) {
+      console.error('Pollinations fallback failed:', pollinationsErr.message);
+      try {
+        // Fallback to local image 
+        const __dirname = path.resolve();
+        const imagePath = path.join(__dirname, '..', 'public', 'design1.png');
+        const fileBuffer = fs.readFileSync(imagePath);
+        const base64Image = `data:image/png;base64,${fileBuffer.toString('base64')}`;
+        
+        sendProgress('Complete (Offline Cache)!', 100);
+        return res.json({ imageUrls: [base64Image, base64Image, base64Image, base64Image, base64Image] });
+      } catch (fallbackErr) {
+        console.error('Ultimate fallback failed:', fallbackErr.message);
+        res.status(500).json({ error: 'Failed to generate image' });
+      }
     }
   }
 });
